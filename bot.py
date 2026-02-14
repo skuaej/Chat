@@ -132,15 +132,10 @@ async def timeout_task(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data
     user = get_user(user_id)
-    
     if user and user.get("status") == "searching":
         set_status(user_id, "idle")
         try:
-            await context.bot.send_message(
-                user_id, 
-                "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", 
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await context.bot.send_message(user_id, "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", parse_mode=ParseMode.MARKDOWN)
         except: pass
 
 # --- FORCE SUB LOGIC ---
@@ -162,14 +157,10 @@ async def send_force_sub_message(update: Update, context: ContextTypes.DEFAULT_T
         chat = await context.bot.get_chat(UPDATE_CHANNEL_ID)
         link = chat.invite_link if chat.invite_link else f"https://t.me/{chat.username}"
     except: link = "https://t.me/telegram"
-
     text = "🔒 **Locked Access**\n\nTo use this bot, you must join our update channel first."
     keyboard = [[InlineKeyboardButton("📢 Join Channel", url=link)], [InlineKeyboardButton("✅ I Joined", callback_data="check_sub")]]
-    
-    if update.callback_query:
-        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    if update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 # --- STATES ---
 REG_NAME, REG_AGE, REG_GENDER, REG_BIO, REG_PHOTO = range(5)
@@ -182,14 +173,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
     
-    # Safe Logging with HTML (Fixes Bad Request error)
     try:
         first_name = html.escape(update.effective_user.first_name or "Unknown")
         username = html.escape(update.effective_user.username or "None")
         log_text = f"👤 <b>New Session</b>\n🆔 ID: <code>{user_id}</code>\n📛 Name: {first_name}\n🔗 Username: @{username}"
         await context.bot.send_message(LOG_GROUP_ID, log_text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        print(f"Log Error: {e}")
+    except: pass
 
     if not user and context.args:
         referrer_arg = context.args[0]
@@ -206,12 +195,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_profile_menu(update, context, user)
         return ConversationHandler.END
     else:
-        await update.message.reply_text(
-            "👋 **Welcome!**\nLet's create your profile to get started.\n\n👉 **What is your name?**",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("👋 **Welcome!**\nLet's create your profile to get started.\n\n👉 **What is your name?**", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
         return REG_NAME
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    if user:
+        await send_profile_menu(update, context, user)
+    else:
+        await update.message.reply_text("⚠️ Register first with /start")
 
 async def send_profile_menu(update, context, user):
     caption = (
@@ -240,13 +233,16 @@ async def send_profile_menu(update, context, user):
     ]
     
     chat_id = update.effective_chat.id
-    try:
-        if user.get("photo_id"):
+    
+    # SAFE PHOTO SENDING LOGIC
+    if user.get("photo_id"):
+        try:
             await context.bot.send_photo(chat_id, user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
-        else:
+        except Exception:
+            # If photo fails, send TEXT ONLY
             await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
-    except:
-        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
 
 # --- REGISTRATION STEPS ---
 
@@ -325,9 +321,16 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = [[InlineKeyboardButton("✅ Accept", callback_data=f"connect_{user_id}"), InlineKeyboardButton("❌ Decline", callback_data=f"reject_{user_id}")]]
     caption = f"📩 **CHAT REQUEST!**\n\n👤 **{my_user.get('name')}**, {my_user.get('age')}\n📝 **Bio:** {my_user.get('bio')}\n\nAccept chat?"
+    
+    # SAFE REQUEST SENDING
     try:
-        if my_user.get("photo_id"): await context.bot.send_photo(target_id, my_user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
-        else: await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        if my_user.get("photo_id"):
+            try:
+                await context.bot.send_photo(target_id, my_user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+            except:
+                await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        else: 
+            await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
         await update.message.reply_text("✅ **Request Sent!**")
     except: await update.message.reply_text("❌ **Failed to send.**")
 
@@ -336,14 +339,12 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    # Block current partner if chatting
     if user and user.get("status") == "chatting" and user.get("chat_partner"):
         partner_id = user["chat_partner"]
         block_user(user_id, partner_id)
         await stop_handler(update, context)
         await update.message.reply_text(f"🚫 **User {partner_id} blocked.**", parse_mode=ParseMode.MARKDOWN)
         return
-    # Block by ID
     if context.args:
         try:
             target_id = int(context.args[0])
@@ -360,8 +361,7 @@ async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(context.args[0])
         unblock_user(update.effective_user.id, target_id)
         await update.message.reply_text(f"✅ **ID {target_id} unblocked.**", parse_mode=ParseMode.MARKDOWN)
-    except: 
-        await update.message.reply_text("⚠️ Invalid ID.", parse_mode=ParseMode.MARKDOWN)
+    except: pass
 
 # --- SEARCH & CHAT ---
 
@@ -389,8 +389,6 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         set_status(user_id, "searching")
         await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
-        
-        # FIX: Check if job queue exists before using it
         if context.job_queue:
             current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
             for job in current_jobs: job.schedule_removal()
@@ -400,17 +398,18 @@ async def send_match_message(context, to_id, partner_id):
     partner = get_user(partner_id)
     text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
     keyboard = [[InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")], [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")]]
-    await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
+    
+    # SAFE MATCH MESSAGE
+    try:
+        await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
+    except: pass
 
 async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if update.callback_query: await update.callback_query.answer()
-    
-    # FIX: Check if job queue exists
     if context.job_queue:
         current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
         for job in current_jobs: job.schedule_removal()
-    
     partner_id = clear_chat_pair(user_id)
     keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
     await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -433,7 +432,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = get_user(int(data[1]))
         if target:
             caption = f"👤 **{target.get('name')}**\n{target.get('bio')}"
-            await context.bot.send_photo(query.from_user.id, target.get("photo_id"), caption=caption, protect_content=True, parse_mode=ParseMode.MARKDOWN)
+            # SAFE PHOTO SENDING
+            try:
+                await context.bot.send_photo(query.from_user.id, target.get("photo_id"), caption=caption, protect_content=True, parse_mode=ParseMode.MARKDOWN)
+            except:
+                await context.bot.send_message(query.from_user.id, caption, parse_mode=ParseMode.MARKDOWN)
         await query.answer()
     elif action == "search":
         await query.answer()
@@ -503,11 +506,17 @@ async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Partner disconnected.")
             await stop_handler(update, context)
 
-# --- EDIT PROFILE ---
+# --- EDIT PROFILE FIX ---
 async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Name", "Age"], ["Gender", "Bio"], ["Photo", "Cancel"]]
-    if update.callback_query: await update.callback_query.answer()
-    await update.message.reply_text("✏️ **What do you want to edit?**", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    text = "✏️ **What do you want to edit?**"
+    
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     return EDIT_SELECT
 
 async def edit_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,14 +538,13 @@ async def edit_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⚠️ Age must be a number.")
                 return EDIT_UPDATE
         users_collection.update_one({"_id": user_id}, {"$set": {field: val}})
-    await update.message.reply_text("✅ **Profile Updated!**", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("✅ **Profile Updated!**\nUse /profile to check.", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
 def main():
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
     
-    # Conversations
     reg_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)], 
         states={
@@ -547,7 +555,10 @@ def main():
     )
 
     edit_conv = ConversationHandler(
-        entry_points=[CommandHandler("edit", edit_start), CallbackQueryHandler(edit_start, pattern="^edit$")],
+        entry_points=[
+            CommandHandler("edit", edit_start),
+            CallbackQueryHandler(edit_start, pattern="^edit$")
+        ],
         states={EDIT_SELECT: [MessageHandler(filters.TEXT, edit_select)], EDIT_UPDATE: [MessageHandler(filters.ALL, edit_update)]},
         fallbacks=[CommandHandler("cancel", cancel)], allow_reentry=True
     )
@@ -557,6 +568,7 @@ def main():
     
     app.add_handler(CommandHandler("search", search_handler))
     app.add_handler(CommandHandler("chat", direct_chat_handler))
+    app.add_handler(CommandHandler("profile", profile_command))
     app.add_handler(CommandHandler("next", next_handler))
     app.add_handler(CommandHandler("stop", stop_handler))
     app.add_handler(CommandHandler("balance", balance_command))
@@ -568,7 +580,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running: Crash Fixes + Unblock Command...")
+    print("Bot Running: Fixed Photo Sending & Edit Crash...")
     app.run_polling()
 
 if __name__ == "__main__":
