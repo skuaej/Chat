@@ -126,17 +126,59 @@ def find_search_partner(my_id):
         return result[0]
     return None
 
-# --- TIMEOUT LOGIC ---
+# --- JOB QUEUE TASKS (TIMEOUTS) ---
 
-async def timeout_task(context: ContextTypes.DEFAULT_TYPE):
+async def search_timeout_task(context: ContextTypes.DEFAULT_TYPE):
+    """Ends search after 1 minute if no partner found"""
     job = context.job
     user_id = job.data
     user = get_user(user_id)
+    
     if user and user.get("status") == "searching":
         set_status(user_id, "idle")
         try:
-            await context.bot.send_message(user_id, "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", parse_mode=ParseMode.MARKDOWN)
+            await context.bot.send_message(
+                user_id, 
+                "💤 **Search timed out.**\nNo active users found right now.\n\nTry /next to search again.", 
+                parse_mode=ParseMode.MARKDOWN
+            )
         except: pass
+
+async def inactivity_timeout_task(context: ContextTypes.DEFAULT_TYPE):
+    """Ends chat after 5 minutes of no messages"""
+    job = context.job
+    user_id = job.data
+    user = get_user(user_id)
+    
+    # If user is still chatting, force disconnect
+    if user and user.get("status") == "chatting":
+        partner_id = clear_chat_pair(user_id) # Disconnects both in DB
+        
+        timeout_msg = "⏳ **Chat ended due to inactivity.**\n(No messages for 5 minutes)\n\nType /search to find a new partner."
+        keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
+        
+        try:
+            await context.bot.send_message(user_id, timeout_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        except: pass
+        
+        if partner_id:
+            try:
+                await context.bot.send_message(partner_id, timeout_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            except: pass
+
+def reset_inactivity_timer(context, user_id, partner_id):
+    """Resets the 5-minute timer for both users"""
+    if not context.job_queue: return
+
+    # Remove old timers
+    for uid in [user_id, partner_id]:
+        jobs = context.job_queue.get_jobs_by_name(f"inactivity_{uid}")
+        for job in jobs: job.schedule_removal()
+    
+    # Start new timers (300s = 5 mins)
+    # We only need to schedule it for one person to trigger the disconnect for both, 
+    # but scheduling for both ensures redundancy if one block/fails.
+    context.job_queue.run_once(inactivity_timeout_task, 300, data=user_id, name=f"inactivity_{user_id}")
 
 # --- FORCE SUB LOGIC ---
 
@@ -378,23 +420,27 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_chat_pair(user_id, partner["_id"])
         await send_match_message(context, user_id, partner["_id"])
         await send_match_message(context, partner["_id"], user_id)
+        # Start Inactivity Timer
+        reset_inactivity_timer(context, user_id, partner["_id"])
     else:
         set_status(user_id, "searching")
         await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
+        
+        # Start Search Timeout (60s)
         if context.job_queue:
-            current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
+            # Clean old search jobs
+            current_jobs = context.job_queue.get_jobs_by_name(f"search_{user_id}")
             for job in current_jobs: job.schedule_removal()
-            context.job_queue.run_once(timeout_task, 60, data=user_id, name=str(user_id))
+            
+            context.job_queue.run_once(search_timeout_task, 60, data=user_id, name=f"search_{user_id}")
 
 async def send_match_message(context, to_id, partner_id):
     partner = get_user(partner_id)
     text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
-    
-    # ADDED BLOCK BUTTON HERE
     keyboard = [
         [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
         [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")],
-        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_match_{partner_id}")]
+        [InlineKeyboardButton("🚫 Block", callback_data=f"block_match_{partner_id}")]
     ]
     try:
         await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
@@ -403,12 +449,17 @@ async def send_match_message(context, to_id, partner_id):
 async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if update.callback_query: await update.callback_query.answer()
+    
+    # Clean Jobs
     if context.job_queue:
-        current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
-        for job in current_jobs: job.schedule_removal()
+        for prefix in ["search_", "inactivity_"]:
+            current_jobs = context.job_queue.get_jobs_by_name(f"{prefix}{user_id}")
+            for job in current_jobs: job.schedule_removal()
+
     partner_id = clear_chat_pair(user_id)
     keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
     await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    
     if partner_id:
         try: await context.bot.send_message(partner_id, "⚠️ **Partner left the chat.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         except: pass
@@ -450,14 +501,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start(update, context)
         else: await query.message.reply_text("❌ Not joined yet!", ephemeral=True)
     
-    # BLOCK MATCH LOGIC
+    # BLOCK MATCH
     elif action == "block_match":
         target_id = int(data[1])
         my_id = query.from_user.id
         block_user(my_id, target_id)
-        await stop_handler(update, context) # Disconnects and ends chat
+        await stop_handler(update, context)
         await query.message.reply_text("🚫 **User blocked.** You will not match with them again.", parse_mode=ParseMode.MARKDOWN)
-    
+
     elif action == "connect":
         sender_id = int(data[1])
         my_id = query.from_user.id
@@ -468,6 +519,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         await send_match_message(context, my_id, sender_id)
         await send_match_message(context, sender_id, my_id)
+        reset_inactivity_timer(context, my_id, sender_id)
 
     elif action == "reject":
         sender_id = int(data[1])
@@ -497,6 +549,10 @@ async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = get_user(user_id)
     if user and user.get("status") == "chatting" and user.get("chat_partner"):
         partner_id = user["chat_partner"]
+        
+        # Reset Timer
+        reset_inactivity_timer(context, user_id, partner_id)
+        
         try:
             if update.message.text: await context.bot.send_message(partner_id, update.message.text, protect_content=True)
             elif update.message.photo: await context.bot.send_photo(partner_id, update.message.photo[-1].file_id, protect_content=True)
@@ -580,7 +636,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running: Fixed Photo Sending & Edit Crash...")
+    print("Bot Running: Added Timers & Block Button...")
     app.run_polling()
 
 if __name__ == "__main__":
