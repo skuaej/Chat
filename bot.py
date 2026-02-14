@@ -233,13 +233,10 @@ async def send_profile_menu(update, context, user):
     ]
     
     chat_id = update.effective_chat.id
-    
-    # SAFE PHOTO SENDING LOGIC
     if user.get("photo_id"):
         try:
             await context.bot.send_photo(chat_id, user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
-        except Exception:
-            # If photo fails, send TEXT ONLY
+        except:
             await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
     else:
         await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
@@ -321,16 +318,11 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = [[InlineKeyboardButton("✅ Accept", callback_data=f"connect_{user_id}"), InlineKeyboardButton("❌ Decline", callback_data=f"reject_{user_id}")]]
     caption = f"📩 **CHAT REQUEST!**\n\n👤 **{my_user.get('name')}**, {my_user.get('age')}\n📝 **Bio:** {my_user.get('bio')}\n\nAccept chat?"
-    
-    # SAFE REQUEST SENDING
     try:
         if my_user.get("photo_id"):
-            try:
-                await context.bot.send_photo(target_id, my_user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
-            except:
-                await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
-        else: 
-            await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+            try: await context.bot.send_photo(target_id, my_user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+            except: await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+        else: await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
         await update.message.reply_text("✅ **Request Sent!**")
     except: await update.message.reply_text("❌ **Failed to send.**")
 
@@ -397,9 +389,13 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_match_message(context, to_id, partner_id):
     partner = get_user(partner_id)
     text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
-    keyboard = [[InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")], [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")]]
     
-    # SAFE MATCH MESSAGE
+    # ADDED BLOCK BUTTON HERE
+    keyboard = [
+        [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
+        [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")],
+        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_match_{partner_id}")]
+    ]
     try:
         await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
     except: pass
@@ -432,11 +428,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = get_user(int(data[1]))
         if target:
             caption = f"👤 **{target.get('name')}**\n{target.get('bio')}"
-            # SAFE PHOTO SENDING
-            try:
-                await context.bot.send_photo(query.from_user.id, target.get("photo_id"), caption=caption, protect_content=True, parse_mode=ParseMode.MARKDOWN)
-            except:
-                await context.bot.send_message(query.from_user.id, caption, parse_mode=ParseMode.MARKDOWN)
+            try: await context.bot.send_photo(query.from_user.id, target.get("photo_id"), caption=caption, protect_content=True, parse_mode=ParseMode.MARKDOWN)
+            except: await context.bot.send_message(query.from_user.id, caption, parse_mode=ParseMode.MARKDOWN)
         await query.answer()
     elif action == "search":
         await query.answer()
@@ -456,6 +449,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.delete()
             await start(update, context)
         else: await query.message.reply_text("❌ Not joined yet!", ephemeral=True)
+    
+    # BLOCK MATCH LOGIC
+    elif action == "block_match":
+        target_id = int(data[1])
+        my_id = query.from_user.id
+        block_user(my_id, target_id)
+        await stop_handler(update, context) # Disconnects and ends chat
+        await query.message.reply_text("🚫 **User blocked.** You will not match with them again.", parse_mode=ParseMode.MARKDOWN)
     
     elif action == "connect":
         sender_id = int(data[1])
@@ -511,7 +512,6 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Name", "Age"], ["Gender", "Bio"], ["Photo", "Cancel"]]
     markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     text = "✏️ **What do you want to edit?**"
-    
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
