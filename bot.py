@@ -128,7 +128,7 @@ def find_search_partner(my_id):
 
 # --- TIMEOUT LOGIC ---
 
-async def timeout_task(context: ContextTypes.DEFAULT_TYPE):
+async def search_timeout_task(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data
     user = get_user(user_id)
@@ -142,22 +142,22 @@ async def inactivity_timeout_task(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data
     user = get_user(user_id)
-    
     if user and user.get("status") == "chatting":
         partner_id = clear_chat_pair(user_id)
         msg = "⏳ **Chat ended due to inactivity.**\n(No messages for 5 minutes)\n\nType /search to find a new partner."
-        keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
-        try: await context.bot.send_message(user_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        try: await context.bot.send_message(user_id, msg, parse_mode=ParseMode.MARKDOWN)
         except: pass
         if partner_id:
-            try: await context.bot.send_message(partner_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            try: await context.bot.send_message(partner_id, msg, parse_mode=ParseMode.MARKDOWN)
             except: pass
 
 def reset_inactivity_timer(context, user_id, partner_id):
     if not context.job_queue: return
+    # Remove old timers
     for uid in [user_id, partner_id]:
         jobs = context.job_queue.get_jobs_by_name(f"inactivity_{uid}")
         for job in jobs: job.schedule_removal()
+    # Add new timer (300s = 5 mins)
     context.job_queue.run_once(inactivity_timeout_task, 300, data=user_id, name=f"inactivity_{user_id}")
 
 # --- FORCE SUB LOGIC ---
@@ -241,7 +241,7 @@ async def send_profile_menu(update, context, user):
         "💌 /chat `[ID]` - Direct Request\n"
         "🛑 /stop - End Current Chat\n"
         "➡️ /next - Skip Partner\n"
-        "🚫 /block - Block Current Match\n"
+        "🚫 /block - Block User\n"
         "🔓 /unblock `[ID]` - Unblock User\n"
         "💰 /balance - Check Coins\n"
         "🎁 /referral - Invite & Earn\n\n"
@@ -348,37 +348,24 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("✅ **Request Sent!**")
     except: await update.message.reply_text("❌ **Failed to send.**")
 
-# --- BLOCK / UNBLOCK COMMANDS ---
+# --- BLOCK / UNBLOCK ---
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    
-    # 1. Block Current Partner (Priority)
     if user and user.get("status") == "chatting" and user.get("chat_partner"):
         partner_id = user["chat_partner"]
         block_user(user_id, partner_id)
         await stop_handler(update, context)
         await update.message.reply_text(f"🚫 **User {partner_id} blocked.**", parse_mode=ParseMode.MARKDOWN)
         return
-    
-    # 2. Manual Block by ID
     if context.args:
         try:
             target_id = int(context.args[0])
             block_user(user_id, target_id)
             await update.message.reply_text(f"🚫 **ID {target_id} blocked.**", parse_mode=ParseMode.MARKDOWN)
-        except: 
-            await update.message.reply_text("⚠️ **Invalid ID.**", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    # 3. Help Text
-    await update.message.reply_text(
-        "⚠️ **How to Block:**\n\n"
-        "1. **Inside Chat:** Just type `/block` to block current partner.\n"
-        "2. **Manual:** Type `/block [User_ID]` to block a specific user.", 
-        parse_mode=ParseMode.MARKDOWN
-    )
+        except: pass
+    else: await update.message.reply_text("⚠️ **Usage:** `/block` inside chat, or `/block [ID]`", parse_mode=ParseMode.MARKDOWN)
 
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -417,20 +404,21 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         set_status(user_id, "searching")
         await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
+        # SAFETY CHECK FOR JOB QUEUE
         if context.job_queue:
+            # Clean old search jobs
             current_jobs = context.job_queue.get_jobs_by_name(f"search_{user_id}")
             for job in current_jobs: job.schedule_removal()
-            context.job_queue.run_once(timeout_task, 60, data=user_id, name=f"search_{user_id}")
+            # 60s timeout
+            context.job_queue.run_once(search_timeout_task, 60, data=user_id, name=f"search_{user_id}")
 
 async def send_match_message(context, to_id, partner_id):
     partner = get_user(partner_id)
     text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
-    
-    # FIXED BLOCK BUTTON DATA
     keyboard = [
         [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
         [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")],
-        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_{partner_id}")]
+        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_match_{partner_id}")]
     ]
     try:
         await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
@@ -491,19 +479,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await query.message.reply_text("❌ Not joined yet!", ephemeral=True)
     
     # FIXED BLOCK LOGIC
-    elif action == "block":
-        # Data format: block_12345
+    elif action == "block_match":
         target_id = int(data[1])
         my_id = query.from_user.id
-        
-        # Block in DB
         block_user(my_id, target_id)
-        
-        # End Chat if active
         await stop_handler(update, context)
-        
-        # Notify
-        await query.message.reply_text(f"🚫 **User {target_id} blocked.**\nYou will not be matched with them again.", parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text("🚫 **User blocked.**", parse_mode=ParseMode.MARKDOWN)
 
     elif action == "connect":
         sender_id = int(data[1])
@@ -545,10 +526,7 @@ async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = get_user(user_id)
     if user and user.get("status") == "chatting" and user.get("chat_partner"):
         partner_id = user["chat_partner"]
-        
-        # Reset Timer on Message
         reset_inactivity_timer(context, user_id, partner_id)
-        
         try:
             if update.message.text: await context.bot.send_message(partner_id, update.message.text, protect_content=True)
             elif update.message.photo: await context.bot.send_photo(partner_id, update.message.photo[-1].file_id, protect_content=True)
@@ -632,10 +610,9 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running: Fixed Block Button & Manual Block Command...")
+    print("Bot Running: Fixed Job Queue & Block Button...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
 
