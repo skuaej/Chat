@@ -4,6 +4,7 @@ import time
 import datetime
 import asyncio
 import os
+import html
 from pymongo import MongoClient
 
 # --- HEROKU CONFIGURATION ---
@@ -131,10 +132,15 @@ async def timeout_task(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     user_id = job.data
     user = get_user(user_id)
+    
     if user and user.get("status") == "searching":
         set_status(user_id, "idle")
         try:
-            await context.bot.send_message(user_id, "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", parse_mode=ParseMode.MARKDOWN)
+            await context.bot.send_message(
+                user_id, 
+                "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", 
+                parse_mode=ParseMode.MARKDOWN
+            )
         except: pass
 
 # --- FORCE SUB LOGIC ---
@@ -156,10 +162,14 @@ async def send_force_sub_message(update: Update, context: ContextTypes.DEFAULT_T
         chat = await context.bot.get_chat(UPDATE_CHANNEL_ID)
         link = chat.invite_link if chat.invite_link else f"https://t.me/{chat.username}"
     except: link = "https://t.me/telegram"
+
     text = "🔒 **Locked Access**\n\nTo use this bot, you must join our update channel first."
     keyboard = [[InlineKeyboardButton("📢 Join Channel", url=link)], [InlineKeyboardButton("✅ I Joined", callback_data="check_sub")]]
-    if update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    
+    if update.callback_query:
+        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 # --- STATES ---
 REG_NAME, REG_AGE, REG_GENDER, REG_BIO, REG_PHOTO = range(5)
@@ -172,10 +182,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
     
+    # Safe Logging with HTML (Fixes Bad Request error)
     try:
-        log_text = f"👤 **New Session**\n🆔 ID: `{user_id}`\n📛 Name: {update.effective_user.first_name}"
-        await context.bot.send_message(LOG_GROUP_ID, log_text, parse_mode=ParseMode.MARKDOWN)
-    except: pass
+        first_name = html.escape(update.effective_user.first_name or "Unknown")
+        username = html.escape(update.effective_user.username or "None")
+        log_text = f"👤 <b>New Session</b>\n🆔 ID: <code>{user_id}</code>\n📛 Name: {first_name}\n🔗 Username: @{username}"
+        await context.bot.send_message(LOG_GROUP_ID, log_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Log Error: {e}")
 
     if not user and context.args:
         referrer_arg = context.args[0]
@@ -192,13 +206,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_profile_menu(update, context, user)
         return ConversationHandler.END
     else:
-        await update.message.reply_text("👋 **Welcome!**\nLet's create your profile to get started.\n\n👉 **What is your name?**", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "👋 **Welcome!**\nLet's create your profile to get started.\n\n👉 **What is your name?**",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return REG_NAME
 
 async def send_profile_menu(update, context, user):
-    # UPDATED: Added Commands List
     caption = (
-        f"💎 **YOUR PROFILE** 💎\n"
+        f"💎 **YOUR PROFILE** 💎\n\n"
         f"👤 **Name:** {user.get('name')}\n"
         f"🎂 **Age:** {user.get('age')}\n"
         f"⚧ **Gender:** {user.get('gender')}\n"
@@ -210,6 +227,7 @@ async def send_profile_menu(update, context, user):
         "🛑 /stop - End Current Chat\n"
         "➡️ /next - Skip Partner\n"
         "🚫 /block - Block User\n"
+        "🔓 /unblock `[ID]` - Unblock User\n"
         "💰 /balance - Check Coins\n"
         "🎁 /referral - Invite & Earn\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -318,12 +336,14 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
+    # Block current partner if chatting
     if user and user.get("status") == "chatting" and user.get("chat_partner"):
         partner_id = user["chat_partner"]
         block_user(user_id, partner_id)
         await stop_handler(update, context)
         await update.message.reply_text(f"🚫 **User {partner_id} blocked.**", parse_mode=ParseMode.MARKDOWN)
         return
+    # Block by ID
     if context.args:
         try:
             target_id = int(context.args[0])
@@ -333,12 +353,15 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: await update.message.reply_text("⚠️ **Usage:** `/block` inside chat, or `/block [ID]`", parse_mode=ParseMode.MARKDOWN)
 
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    if not context.args:
+        await update.message.reply_text("⚠️ **Usage:** `/unblock [ID]`", parse_mode=ParseMode.MARKDOWN)
+        return
     try:
         target_id = int(context.args[0])
         unblock_user(update.effective_user.id, target_id)
         await update.message.reply_text(f"✅ **ID {target_id} unblocked.**", parse_mode=ParseMode.MARKDOWN)
-    except: pass
+    except: 
+        await update.message.reply_text("⚠️ Invalid ID.", parse_mode=ParseMode.MARKDOWN)
 
 # --- SEARCH & CHAT ---
 
@@ -366,9 +389,12 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         set_status(user_id, "searching")
         await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
-        current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
-        for job in current_jobs: job.schedule_removal()
-        context.job_queue.run_once(timeout_task, 60, data=user_id, name=str(user_id))
+        
+        # FIX: Check if job queue exists before using it
+        if context.job_queue:
+            current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
+            for job in current_jobs: job.schedule_removal()
+            context.job_queue.run_once(timeout_task, 60, data=user_id, name=str(user_id))
 
 async def send_match_message(context, to_id, partner_id):
     partner = get_user(partner_id)
@@ -379,8 +405,12 @@ async def send_match_message(context, to_id, partner_id):
 async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if update.callback_query: await update.callback_query.answer()
-    current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
-    for job in current_jobs: job.schedule_removal()
+    
+    # FIX: Check if job queue exists
+    if context.job_queue:
+        current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
+        for job in current_jobs: job.schedule_removal()
+    
     partner_id = clear_chat_pair(user_id)
     keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
     await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -506,6 +536,7 @@ def main():
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
     
+    # Conversations
     reg_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)], 
         states={
@@ -537,7 +568,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running with Menu List Feature...")
+    print("Bot Running: Crash Fixes + Unblock Command...")
     app.run_polling()
 
 if __name__ == "__main__":
