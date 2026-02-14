@@ -154,13 +154,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
     
-    # Log to Group
     try:
         log_text = f"👤 **New Session**\n🆔 ID: `{user_id}`\n📛 Name: {update.effective_user.first_name}"
         await context.bot.send_message(LOG_GROUP_ID, log_text, parse_mode=ParseMode.MARKDOWN)
     except: pass
 
-    # Referral Logic
     if not user and context.args:
         referrer_arg = context.args[0]
         if referrer_arg.startswith("ref_"):
@@ -195,9 +193,10 @@ async def send_profile_menu(update, context, user):
         "🚀 **Ready to chat?**\n"
         "Click the button below to find a partner instantly!"
     )
+    # FIXED: Changed callback_data to single words 'search' and 'edit'
     keyboard = [
-        [InlineKeyboardButton("💬 Start Chatting", callback_data="search_btn")],
-        [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit_profile")]
+        [InlineKeyboardButton("💬 Start Chatting", callback_data="search")],
+        [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit")]
     ]
     
     chat_id = update.effective_chat.id
@@ -262,7 +261,6 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    # Handle Button Click vs Command
     if update.callback_query: 
         await update.callback_query.answer()
 
@@ -281,7 +279,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # SEARCH ANIMATION
     status_msg = await context.bot.send_message(chat_id, "🔎 **Searching for a partner...**", parse_mode=ParseMode.MARKDOWN)
-    await asyncio.sleep(1.5) # Fake loading for effect
+    await asyncio.sleep(1.5) 
     
     partner = find_search_partner(user_id)
     
@@ -294,11 +292,9 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_status(user_id, "searching")
         await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
         
-        # Reset Jobs
         current_jobs = context.job_queue.get_jobs_by_name(str(user_id))
         for job in current_jobs: job.schedule_removal()
         
-        # 60s Timeout
         context.job_queue.run_once(timeout_task, 60, data=user_id, name=str(user_id))
 
 async def send_match_message(context, to_id, partner_id):
@@ -313,7 +309,7 @@ async def send_match_message(context, to_id, partner_id):
     
     keyboard = [
         [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
-        [InlineKeyboardButton("➡️ Next Partner", callback_data="next_btn"), InlineKeyboardButton("🛑 Stop", callback_data="stop_btn")]
+        [InlineKeyboardButton("➡️ Next Partner", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")]
     ]
     
     await context.bot.send_message(
@@ -333,11 +329,9 @@ async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     partner_id = clear_chat_pair(user_id)
     
-    # Message for ME
-    keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search_btn")]]
+    keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
     await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     
-    # Message for PARTNER
     if partner_id:
         try: 
             await context.bot.send_message(partner_id, "⚠️ **Partner left the chat.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -354,6 +348,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split("_")
     action = data[0]
 
+    # FIXED: Check simple action strings
     if action == "view":
         target = get_user(int(data[1]))
         if target:
@@ -361,19 +356,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(query.from_user.id, target.get("photo_id"), caption=caption, protect_content=True, parse_mode=ParseMode.MARKDOWN)
         await query.answer()
 
-    elif action == "search_btn":
+    elif action == "search":
         await query.answer()
         await search_handler(update, context)
         
-    elif action == "next_btn":
+    elif action == "next":
         await query.answer()
         await next_handler(update, context)
         
-    elif action == "stop_btn":
+    elif action == "stop":
         await query.answer()
         await stop_handler(update, context)
 
-    elif action == "edit_profile":
+    # Edit is handled by the ConversationHandler pattern below
+    elif action == "edit":
         await query.answer()
         await query.message.reply_text("Type /edit to change your profile.")
 
@@ -463,8 +459,12 @@ def main():
         }, fallbacks=[CommandHandler("cancel", cancel)], allow_reentry=True
     )
 
+    # FIXED: Added CallbackQueryHandler with pattern="^edit$"
     edit_conv = ConversationHandler(
-        entry_points=[CommandHandler("edit", edit_start), CallbackQueryHandler(edit_start, pattern="^edit_profile$")],
+        entry_points=[
+            CommandHandler("edit", edit_start),
+            CallbackQueryHandler(edit_start, pattern="^edit$")
+        ],
         states={EDIT_SELECT: [MessageHandler(filters.TEXT, edit_select)], EDIT_UPDATE: [MessageHandler(filters.ALL, edit_update)]},
         fallbacks=[CommandHandler("cancel", cancel)], allow_reentry=True
     )
@@ -472,22 +472,17 @@ def main():
     app.add_handler(reg_conv)
     app.add_handler(edit_conv)
     
-    # Core Commands
     app.add_handler(CommandHandler("search", search_handler))
     app.add_handler(CommandHandler("next", next_handler))
     app.add_handler(CommandHandler("stop", stop_handler))
-    
-    # Utility Commands
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("referral", referral_command))
     app.add_handler(CommandHandler("stats", admin_stats))
     
-    # Handlers
     app.add_handler(CallbackQueryHandler(button_handler))
-    # Added filters.VOICE and filters.VIDEO so users can send more than just text
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running with UI Polish & Fixes...")
+    print("Bot Running: Fixed Buttons & Enhanced UI...")
     app.run_polling()
 
 if __name__ == "__main__":
