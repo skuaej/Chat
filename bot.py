@@ -126,38 +126,59 @@ def find_search_partner(my_id):
         return result[0]
     return None
 
-# --- TIMEOUT LOGIC ---
+# --- JOB QUEUE (TIMEOUTS) ---
 
 async def search_timeout_task(context: ContextTypes.DEFAULT_TYPE):
+    """Stops search if no partner found in 60s"""
     job = context.job
     user_id = job.data
     user = get_user(user_id)
+    
     if user and user.get("status") == "searching":
         set_status(user_id, "idle")
         try:
-            await context.bot.send_message(user_id, "💤 **No active partners found.**\nIt seems quiet right now. Please try searching again in a few minutes!", parse_mode=ParseMode.MARKDOWN)
+            keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="search")]]
+            await context.bot.send_message(
+                user_id, 
+                "💤 **Search timed out.**\nNo active partners found right now.", 
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
         except: pass
 
 async def inactivity_timeout_task(context: ContextTypes.DEFAULT_TYPE):
+    """Disconnects chat if no messages for 5 mins"""
     job = context.job
     user_id = job.data
     user = get_user(user_id)
+    
+    # Only act if they are still chatting
     if user and user.get("status") == "chatting":
-        partner_id = clear_chat_pair(user_id)
-        msg = "⏳ **Chat ended due to inactivity.**\n(No messages for 5 minutes)\n\nType /search to find a new partner."
-        try: await context.bot.send_message(user_id, msg, parse_mode=ParseMode.MARKDOWN)
+        partner_id = clear_chat_pair(user_id) # Disconnects both in DB
+        
+        msg = "⏳ **Chat ended due to inactivity.**\n(5 minutes with no messages)\n\nType /search to find a new partner."
+        keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
+        
+        try: 
+            await context.bot.send_message(user_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         except: pass
+        
         if partner_id:
-            try: await context.bot.send_message(partner_id, msg, parse_mode=ParseMode.MARKDOWN)
+            try: 
+                await context.bot.send_message(partner_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
             except: pass
 
 def reset_inactivity_timer(context, user_id, partner_id):
+    """Resets the 5-minute timer whenever a message is sent"""
     if not context.job_queue: return
-    # Remove old timers
+    
+    # 1. Clear old timers for both users
     for uid in [user_id, partner_id]:
         jobs = context.job_queue.get_jobs_by_name(f"inactivity_{uid}")
         for job in jobs: job.schedule_removal()
-    # Add new timer (300s = 5 mins)
+    
+    # 2. Start a new single timer (linked to sender)
+    # 300 seconds = 5 minutes
     context.job_queue.run_once(inactivity_timeout_task, 300, data=user_id, name=f"inactivity_{user_id}")
 
 # --- FORCE SUB LOGIC ---
@@ -171,7 +192,7 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return False
         return True
     except Exception as e:
-        print(f"Force Sub Error: {e}")
+        # If bot is not admin in channel, let user pass (fail-safe)
         return True
 
 async def send_force_sub_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,10 +244,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    if user:
-        await send_profile_menu(update, context, user)
-    else:
-        await update.message.reply_text("⚠️ Register first with /start")
+    if user: await send_profile_menu(update, context, user)
+    else: await update.message.reply_text("⚠️ Register first with /start")
 
 async def send_profile_menu(update, context, user):
     caption = (
@@ -242,24 +261,17 @@ async def send_profile_menu(update, context, user):
         "🛑 /stop - End Current Chat\n"
         "➡️ /next - Skip Partner\n"
         "🚫 /block - Block User\n"
-        "🔓 /unblock `[ID]` - Unblock User\n"
         "💰 /balance - Check Coins\n"
         "🎁 /referral - Invite & Earn\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🚀 **Ready to chat?**\n"
         "Click the button below to find a partner!"
     )
-    keyboard = [
-        [InlineKeyboardButton("💬 Start Chatting", callback_data="search")],
-        [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit")]
-    ]
-    
+    keyboard = [[InlineKeyboardButton("💬 Start Chatting", callback_data="search")], [InlineKeyboardButton("✏️ Edit Profile", callback_data="edit")]]
     chat_id = update.effective_chat.id
     if user.get("photo_id"):
-        try:
-            await context.bot.send_photo(chat_id, user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
-        except:
-            await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
+        try: await context.bot.send_photo(chat_id, user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
+        except: await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
     else:
         await context.bot.send_message(chat_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
 
@@ -310,7 +322,81 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚫 Operation canceled.")
     return ConversationHandler.END
 
-# --- DIRECT CHAT REQUEST ---
+# --- SEARCH & CHAT ---
+
+async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if update.callback_query: await update.callback_query.answer()
+    if not await check_subscription(update, context): return
+    
+    user = get_user(user_id)
+    if not user: return
+    update_activity(user_id)
+
+    # 1. AUTO-DISCONNECT if already chatting
+    if user.get("status") == "chatting":
+        # Disconnect from old partner quietly
+        old_partner_id = clear_chat_pair(user_id)
+        if old_partner_id:
+            try: await context.bot.send_message(old_partner_id, "⚠️ **Partner left to find someone new.**", parse_mode=ParseMode.MARKDOWN)
+            except: pass
+        # We don't return here, we proceed to search!
+
+    status_msg = await context.bot.send_message(chat_id, "🔎 **Searching for a partner...**", parse_mode=ParseMode.MARKDOWN)
+    await asyncio.sleep(1.5) 
+    partner = find_search_partner(user_id)
+    
+    if partner:
+        await status_msg.delete()
+        set_chat_pair(user_id, partner["_id"])
+        await send_match_message(context, user_id, partner["_id"])
+        await send_match_message(context, partner["_id"], user_id)
+        reset_inactivity_timer(context, user_id, partner["_id"])
+    else:
+        set_status(user_id, "searching")
+        await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
+        
+        if context.job_queue:
+            # Clear old search timer
+            current_jobs = context.job_queue.get_jobs_by_name(f"search_{user_id}")
+            for job in current_jobs: job.schedule_removal()
+            # Set new 60s timeout
+            context.job_queue.run_once(search_timeout_task, 60, data=user_id, name=f"search_{user_id}")
+
+async def send_match_message(context, to_id, partner_id):
+    partner = get_user(partner_id)
+    text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
+    keyboard = [
+        [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
+        [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")],
+        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_match_{partner_id}")]
+    ]
+    try: await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
+    except: pass
+
+async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.callback_query: await update.callback_query.answer()
+    
+    # Cleanup Jobs
+    if context.job_queue:
+        for prefix in ["search_", "inactivity_"]:
+            current_jobs = context.job_queue.get_jobs_by_name(f"{prefix}{user_id}")
+            for job in current_jobs: job.schedule_removal()
+
+    partner_id = clear_chat_pair(user_id)
+    keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
+    await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    if partner_id:
+        try: await context.bot.send_message(partner_id, "⚠️ **Partner left the chat.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        except: pass
+
+async def next_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This automatically handles the "Stop & Search New" flow
+    await search_handler(update, context)
+
+# --- OTHER HANDLERS (Direct Chat, Block, etc.) ---
 
 async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -319,36 +405,30 @@ async def direct_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     target_query = context.args[0]
     my_user = get_user(user_id)
-    if not my_user: return
-    if my_user.get("status") == "chatting":
-        await update.message.reply_text("❌ **You are already in a chat!**")
-        return
     target_user = get_user_by_query(target_query)
     if not target_user:
         await update.message.reply_text("❌ **User not found.**", parse_mode=ParseMode.MARKDOWN)
         return
     target_id = target_user["_id"]
     if target_id == user_id:
-        await update.message.reply_text("❌ You cannot chat with yourself.")
+        await update.message.reply_text("❌ Self-chat not allowed.")
         return
     if is_blocked(user_id, target_id):
-        await update.message.reply_text("🚫 **Blocked.** You cannot message this user.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("🚫 **Blocked.**", parse_mode=ParseMode.MARKDOWN)
         return
     if target_user.get("status") == "chatting":
         await update.message.reply_text("❌ **User is busy.**", parse_mode=ParseMode.MARKDOWN)
         return
 
     keyboard = [[InlineKeyboardButton("✅ Accept", callback_data=f"connect_{user_id}"), InlineKeyboardButton("❌ Decline", callback_data=f"reject_{user_id}")]]
-    caption = f"📩 **CHAT REQUEST!**\n\n👤 **{my_user.get('name')}**, {my_user.get('age')}\n📝 **Bio:** {my_user.get('bio')}\n\nAccept chat?"
+    caption = f"📩 **CHAT REQUEST!**\n\n👤 **{my_user.get('name')}**, {my_user.get('age')}\n📝 **Bio:** {my_user.get('bio')}"
     try:
         if my_user.get("photo_id"):
             try: await context.bot.send_photo(target_id, my_user.get("photo_id"), caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
             except: await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
         else: await context.bot.send_message(target_id, caption, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
         await update.message.reply_text("✅ **Request Sent!**")
-    except: await update.message.reply_text("❌ **Failed to send.**")
-
-# --- BLOCK / UNBLOCK ---
+    except: await update.message.reply_text("❌ **Failed.**")
 
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -365,87 +445,31 @@ async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             block_user(user_id, target_id)
             await update.message.reply_text(f"🚫 **ID {target_id} blocked.**", parse_mode=ParseMode.MARKDOWN)
         except: pass
-    else: await update.message.reply_text("⚠️ **Usage:** `/block` inside chat, or `/block [ID]`", parse_mode=ParseMode.MARKDOWN)
+    else: await update.message.reply_text("⚠️ **Usage:** `/block` in chat or `/block [ID]`", parse_mode=ParseMode.MARKDOWN)
 
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ **Usage:** `/unblock [ID]`", parse_mode=ParseMode.MARKDOWN)
-        return
+    if not context.args: return
     try:
         target_id = int(context.args[0])
         unblock_user(update.effective_user.id, target_id)
         await update.message.reply_text(f"✅ **ID {target_id} unblocked.**", parse_mode=ParseMode.MARKDOWN)
     except: pass
 
-# --- SEARCH & CHAT ---
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(update.effective_user.id)
+    if user: await update.message.reply_text(f"💰 **Balance:** `{user.get('coins', 0)}` Coins", parse_mode=ParseMode.MARKDOWN)
 
-async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if update.callback_query: await update.callback_query.answer()
-    if not await check_subscription(update, context): return
-    user = get_user(user_id)
-    if not user: return
-    update_activity(user_id)
-    if user.get("status") == "chatting":
-        await context.bot.send_message(chat_id, "⚠️ **Already in a chat!**", parse_mode=ParseMode.MARKDOWN)
-        return
+    link = f"https://t.me/{context.bot.username}?start=ref_{user_id}"
+    await update.message.reply_text(f"🎁 **Refer & Earn!**\n\n🔗 `{link}`", parse_mode=ParseMode.MARKDOWN)
 
-    status_msg = await context.bot.send_message(chat_id, "🔎 **Searching for a partner...**", parse_mode=ParseMode.MARKDOWN)
-    await asyncio.sleep(1.5) 
-    partner = find_search_partner(user_id)
-    
-    if partner:
-        await status_msg.delete()
-        set_chat_pair(user_id, partner["_id"])
-        await send_match_message(context, user_id, partner["_id"])
-        await send_match_message(context, partner["_id"], user_id)
-        reset_inactivity_timer(context, user_id, partner["_id"])
-    else:
-        set_status(user_id, "searching")
-        await status_msg.edit_text("📡 **Looking for a match...**\n(Waiting for someone else to join)")
-        # SAFETY CHECK FOR JOB QUEUE
-        if context.job_queue:
-            # Clean old search jobs
-            current_jobs = context.job_queue.get_jobs_by_name(f"search_{user_id}")
-            for job in current_jobs: job.schedule_removal()
-            # 60s timeout
-            context.job_queue.run_once(search_timeout_task, 60, data=user_id, name=f"search_{user_id}")
-
-async def send_match_message(context, to_id, partner_id):
-    partner = get_user(partner_id)
-    text = f"🎉 **PARTNER FOUND!** 🎉\n\n👤 **Name:** {partner.get('name')}, {partner.get('age')}\n⚧ **Gender:** {partner.get('gender')}\n📝 **Bio:** {partner.get('bio')}\n\n💬 **Say 'Hi'!**"
-    keyboard = [
-        [InlineKeyboardButton("👀 View Photo", callback_data=f"view_{partner_id}")],
-        [InlineKeyboardButton("➡️ Next", callback_data="next"), InlineKeyboardButton("🛑 Stop", callback_data="stop")],
-        [InlineKeyboardButton("🚫 Block User", callback_data=f"block_match_{partner_id}")]
-    ]
-    try:
-        await context.bot.send_message(to_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard), protect_content=True)
-    except: pass
-
-async def stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if update.callback_query: await update.callback_query.answer()
-    
-    # Clean Jobs
-    if context.job_queue:
-        for prefix in ["search_", "inactivity_"]:
-            current_jobs = context.job_queue.get_jobs_by_name(f"{prefix}{user_id}")
-            for job in current_jobs: job.schedule_removal()
-
-    partner_id = clear_chat_pair(user_id)
-    keyboard = [[InlineKeyboardButton("💬 Find New Partner", callback_data="search")]]
-    await context.bot.send_message(user_id, "🚫 **Chat ended.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    if partner_id:
-        try: await context.bot.send_message(partner_id, "⚠️ **Partner left the chat.**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-        except: pass
-
-async def next_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await stop_handler(update, context)
-    await search_handler(update, context)
-
-# --- CALLBACKS & COMMANDS ---
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID: return
+    total = users_collection.count_documents({})
+    searching = users_collection.count_documents({"status": "searching"})
+    chatting = users_collection.count_documents({"status": "chatting"})
+    await update.message.reply_text(f"📊 **Stats**\n\n👥 Users: {total}\n🔎 Searching: {searching}\n💬 Pairs: {chatting // 2}", parse_mode=ParseMode.MARKDOWN)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -477,49 +501,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.delete()
             await start(update, context)
         else: await query.message.reply_text("❌ Not joined yet!", ephemeral=True)
-    
-    # FIXED BLOCK LOGIC
     elif action == "block_match":
-        target_id = int(data[1])
-        my_id = query.from_user.id
-        block_user(my_id, target_id)
+        target_id = int(data[2]) # format block_match_ID
+        block_user(query.from_user.id, target_id)
         await stop_handler(update, context)
-        await query.message.reply_text("🚫 **User blocked.**", parse_mode=ParseMode.MARKDOWN)
-
+        await query.message.reply_text("🚫 **Blocked.**", parse_mode=ParseMode.MARKDOWN)
     elif action == "connect":
         sender_id = int(data[1])
         my_id = query.from_user.id
         if get_user(sender_id).get("status") == "chatting" or get_user(my_id).get("status") == "chatting":
-            await query.message.edit_text("❌ Connection failed.")
+            await query.message.edit_text("❌ Failed.")
             return
         set_chat_pair(my_id, sender_id)
         await query.message.delete()
         await send_match_message(context, my_id, sender_id)
         await send_match_message(context, sender_id, my_id)
         reset_inactivity_timer(context, my_id, sender_id)
-
     elif action == "reject":
-        sender_id = int(data[1])
         await query.message.delete()
-        await context.bot.send_message(query.from_user.id, "❌ **Declined.**", parse_mode=ParseMode.MARKDOWN)
-        try: await context.bot.send_message(sender_id, "🚫 **Request declined.**", parse_mode=ParseMode.MARKDOWN)
-        except: pass
-
-async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user(update.effective_user.id)
-    if user: await update.message.reply_text(f"💰 **Balance:** `{user.get('coins', 0)}` Coins", parse_mode=ParseMode.MARKDOWN)
-
-async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    link = f"https://t.me/{context.bot.username}?start=ref_{user_id}"
-    await update.message.reply_text(f"🎁 **Refer & Earn!**\n\n🔗 `{link}`", parse_mode=ParseMode.MARKDOWN)
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-    total = users_collection.count_documents({})
-    searching = users_collection.count_documents({"status": "searching"})
-    chatting = users_collection.count_documents({"status": "chatting"})
-    await update.message.reply_text(f"📊 **Stats**\n\n👥 Users: {total}\n🔎 Searching: {searching}\n💬 Pairs: {chatting // 2}", parse_mode=ParseMode.MARKDOWN)
+        await context.bot.send_message(query.from_user.id, "❌ **Declined.**")
 
 async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -541,19 +541,18 @@ async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Name", "Age"], ["Gender", "Bio"], ["Photo", "Cancel"]]
     markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    text = "✏️ **What do you want to edit?**"
+    text = "✏️ **Edit what?**"
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+    else: await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
     return EDIT_SELECT
 
 async def edit_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     selection = update.message.text
     if selection == "Cancel": return ConversationHandler.END
     context.user_data['edit_field'] = selection.lower()
-    await update.message.reply_text(f"📝 Send your new **{selection}**:", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📝 Send new **{selection}**:", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN)
     return EDIT_UPDATE
 
 async def edit_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -564,11 +563,9 @@ async def edit_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = update.message.text
         if field == "age": 
             try: val = int(val)
-            except: 
-                await update.message.reply_text("⚠️ Age must be a number.")
-                return EDIT_UPDATE
+            except: return EDIT_UPDATE
         users_collection.update_one({"_id": user_id}, {"$set": {field: val}})
-    await update.message.reply_text("✅ **Profile Updated!**\nUse /profile to check.", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("✅ **Updated!**", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
 def main():
@@ -585,10 +582,7 @@ def main():
     )
 
     edit_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("edit", edit_start),
-            CallbackQueryHandler(edit_start, pattern="^edit$")
-        ],
+        entry_points=[CommandHandler("edit", edit_start), CallbackQueryHandler(edit_start, pattern="^edit$")],
         states={EDIT_SELECT: [MessageHandler(filters.TEXT, edit_select)], EDIT_UPDATE: [MessageHandler(filters.ALL, edit_update)]},
         fallbacks=[CommandHandler("cancel", cancel)], allow_reentry=True
     )
@@ -610,7 +604,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.VOICE | filters.VIDEO, chat_message_handler))
     
-    print("Bot Running: Fixed Job Queue & Block Button...")
+    print("Bot Running: Auto-Disconnect on Search + Fixed Timeout...")
     app.run_polling()
 
 if __name__ == "__main__":
